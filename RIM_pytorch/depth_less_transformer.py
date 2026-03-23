@@ -7,10 +7,20 @@ import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 from torch.func import vmap, functional_call
 
+from torch_einops_utils import pack_with_inverse
+
 from einops import einsum, repeat, rearrange, pack
 from einops.layers.torch import Rearrange, Reduce
 
-from torch_einops_utils import pack_with_inverse
+# einstein notation
+
+# m - messages
+# l - bLocks
+# b - batch
+# n - sequence
+# d - feature dimension
+# i, j - source and target sequence for attention
+# h - attention heads
 
 # constants
 
@@ -167,18 +177,20 @@ class DepthlessTransformer(Module):
             # then we just do attention pooling / residual for next round
             # will use the initial messages coming in as the queries, all products of all the blocks become messages
 
-            packed_messages, _ = pack(messages, '* b n d')
+            packed_messages, _ = pack(messages, '* b n d') # (message blocks) packed
 
-            packed_messages = repeat(packed_messages, 'm b n d -> (b blocks) n m d', blocks = blocks)
+            packed_messages = repeat(packed_messages, 'm b n d -> (b l) n m d', l = blocks)
 
-            message_queries, inverse_pack_blocks = pack_with_inverse(tokens, '* n d')
+            message_queries, inverse_pack_blocks = pack_with_inverse(tokens, '* n d') # (m b n d)
             message_queries = rearrange(message_queries, '... n d -> ... n 1 d')
+
+            # each message producer attends to all messages (and their history) by all other producers
 
             pooled_messages = self.attn_residual(message_queries, packed_messages)
 
             pooled_messages = inverse_pack_blocks(pooled_messages, '* n one d')
 
-            pooled_messages = rearrange(pooled_messages, 'blocks b n 1 d -> blocks b n d')
+            pooled_messages = rearrange(pooled_messages, 'l b n 1 d -> l b n d')
 
             # keep iterating
 
