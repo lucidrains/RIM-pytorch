@@ -130,13 +130,13 @@ class DepthlessTransformer(Module):
     def __init__(
         self,
         dim,
-        num_tokens = None,
         num_blocks = 6,
         num_message_exchanges = 6,
         dim_head = 64,
         heads = 8,
         causal = False,
-        ff_expansion_factor = 4.
+        ff_expansion_factor = 4.,
+        num_tokens = None,
     ):
         super().__init__()
 
@@ -184,7 +184,8 @@ class DepthlessTransformer(Module):
 
     def forward(
         self,
-        tokens
+        tokens,
+        return_messages = False
     ):
         batch, seq_len, blocks = *tokens.shape[:2], self.num_blocks
 
@@ -237,9 +238,6 @@ class DepthlessTransformer(Module):
 
             tokens = pooled_messages
 
-        if not exists(self.readout):
-            return tokens
-
         # the readout itself is just another message producer
 
         queries = repeat(self.query_readout, 'd -> b n 1 d', b = batch, n = seq_len)
@@ -250,6 +248,13 @@ class DepthlessTransformer(Module):
 
         readout_input = rearrange(readout_input, 'b n 1 d -> b n d')
 
+        if not exists(self.readout):
+            return readout_input
+
         logits = self.readout(readout_input)
 
-        return logits
+        if not return_messages:
+            return logits
+
+        return logits, messages
+
