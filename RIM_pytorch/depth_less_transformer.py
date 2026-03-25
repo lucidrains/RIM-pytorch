@@ -206,7 +206,8 @@ class EnsemblesWithMessagePassing(Module):
         module_kwargs: dict[str, dict] | None = None,
         repeat_input_for_ensemble: bool = False,
         return_all_messages: bool = False
-    ):
+    ): # (l b ...)
+
         if repeat_input_for_ensemble:
             tokens = repeat(tokens, '... -> l ...', l = self.ensemble_size)
 
