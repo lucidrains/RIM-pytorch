@@ -35,20 +35,6 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
-# init
-
-@torch.no_grad()
-def init_ensemble_weights_(params, names):
-    for name, param in zip(names, params):
-        if 'norm' in name:
-            nn.init.ones_(param)
-        elif 'bias' in name:
-            nn.init.zeros_(param)
-        elif 'weight' in name:
-            fan_in = param.shape[-1]
-            bound = fan_in ** -0.5
-            nn.init.uniform_(param, -bound, bound)
-
 # attention
 
 class Attention(Module):
@@ -166,7 +152,7 @@ class Ensemble(Module):
         self.param_names = named_params.keys()
         self.net_parameters = ParameterList([Parameter(repeat_blocks(param).clone()) for param in named_params.values()])
 
-        init_ensemble_weights_(self.net_parameters, self.param_names)
+        self.init_()
 
         # vmapping
 
@@ -175,9 +161,97 @@ class Ensemble(Module):
 
         self.net_forward = vmap(net_forward, in_dims = 0)
 
+    @torch.no_grad()
+    def init_(self):
+        for name, param in self.parameters.items():
+            if 'norm' in name:
+                nn.init.ones_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+            elif 'weight' in name:
+                fan_in = param.shape[-1]
+                bound = fan_in ** -0.5
+                nn.init.uniform_(param, -bound, bound)
+
+    @property
+    def parameters(self):
+        return dict(zip(self.param_names, self.net_parameters))
+
     def forward(self, tokens, *args, **kwargs):
-        params = dict(zip(self.param_names, self.net_parameters))
-        return self.net_forward(params, tokens, *args, **kwargs)
+        return self.net_forward(self.parameters, tokens, *args, **kwargs)
+
+# ensembles with message passing
+
+class EnsemblesWithMessagePassing(Module):
+    def __init__(
+        self,
+        modules: dict[str, Module],
+        ensemble_size: int,
+        voting_attn: Module,
+        num_message_exchanges: int = 1
+    ):
+        super().__init__()
+        self.num_message_exchanges = num_message_exchanges
+        self.ensemble_size = ensemble_size
+
+        self.ensembles = nn.ModuleDict({
+            name: Ensemble(module, ensemble_size) for name, module in modules.items()
+        })
+
+        self.voting_attn = voting_attn
+
+    def forward(
+        self,
+        tokens, # (b ...) or (l b ...)
+        module_kwargs: dict[str, dict] | None = None,
+        repeat_input_for_ensemble: bool = False,
+        return_all_messages: bool = False
+    ):
+        if repeat_input_for_ensemble:
+            tokens = repeat(tokens, '... -> l ...', l = self.ensemble_size)
+
+        module_kwargs = default(module_kwargs, dict())
+        messages = [tokens]
+        blocks = self.ensemble_size
+
+        # reframed as recurrent processing of tokens with message passing (attention residual)
+
+        for count in range(1, self.num_message_exchanges + 1):
+            is_last = count == self.num_message_exchanges
+
+            # collect messages from all ensembles
+
+            for name, ensemble in self.ensembles.items():
+                kwargs = module_kwargs.get(name, dict())
+                out = ensemble(tokens, **kwargs)
+                messages.append(out)
+
+            if is_last:
+                continue
+
+            # then we just do attention pooling (attention 'residual') for next round
+            # will use the initial messages coming in as the queries, all products of all the blocks become messages - voting phase
+
+            all_messages = repeat(messages, 'm lc b ... d -> (b lq) ... (m lc) d', lq = blocks)
+
+            message_queries = rearrange(tokens, 'l b ... d -> (b l) ... 1 d')
+
+            # each message producer attends to all messages (and their history) by all other producers
+
+            pooled_messages = self.voting_attn(message_queries, all_messages)
+
+            pooled_messages = rearrange(pooled_messages, '(b l) ... 1 d -> l b ... d', l = blocks)
+
+            # keep iterating
+
+            tokens = pooled_messages
+
+        assert tokens.shape == messages[0].shape
+
+        if not return_all_messages:
+            return tokens
+
+        return tokens, messages
 
 # classes
 
@@ -199,8 +273,6 @@ class DepthlessTransformer(Module):
         self.num_message_exchanges = num_message_exchanges
 
         self.num_blocks = num_blocks
-        repeat_blocks = Reduce('... -> l ...', 'repeat', l = num_blocks)
-        self.repeat_blocks = repeat_blocks
 
         self.use_pope = use_pope
         if use_pope:
@@ -215,14 +287,21 @@ class DepthlessTransformer(Module):
 
         self.attn_residual = Attention(dim, key_rmsnorm = True, dim_head = dim_head, heads = heads)
 
-        # make ensemble
+        # ensembles with message passing
 
-        self.attn_ensemble = Ensemble(attn, num_blocks)
-        self.ff_ensemble = Ensemble(ff, num_blocks)
+        self.ensembles_with_message_passing = EnsemblesWithMessagePassing(
+            modules = dict(
+                attn = attn,
+                ff = ff
+            ),
+            ensemble_size = num_blocks,
+            voting_attn = self.attn_residual,
+            num_message_exchanges = num_message_exchanges
+        )
 
         # readout
 
-        self.query_readout = nn.Parameter(torch.randn(dim) * 1e-2)
+        self.attn_pool_query = nn.Parameter(torch.randn(dim) * 1e-2)
         self.readout = nn.Sequential(nn.RMSNorm(dim), LinearNoBias(dim, num_tokens)) if exists(num_tokens) else None
 
     def forward(
@@ -232,60 +311,25 @@ class DepthlessTransformer(Module):
     ):
         batch, seq_len, blocks = *tokens.shape[:2], self.num_blocks
 
-        tokens = self.repeat_blocks(tokens) # (l b n d)
+        # positions forwarded to attn ensemble
 
-        # reframed as recurrent processing of tokens with message passing (attention residual)
-
-        messages = [tokens]
-
-        attn_kwargs = dict()
+        module_kwargs = dict()
         if self.use_pope:
             pos_emb = self.pope(seq_len)
-            attn_kwargs = dict(pos_emb = pos_emb)
+            module_kwargs = dict(attn = dict(pos_emb = pos_emb))
 
         # message passing
 
-        for count in enumerate(range(self.num_message_exchanges), start = 1):
-            is_last = count == self.num_message_exchanges
-
-            # representations go into all of the blocks at once, without any notion of depth
-
-            attended = self.attn_ensemble(tokens, **attn_kwargs)
-            retrieved_memories = self.ff_ensemble(tokens)
-
-            # add outputs to processed messages
-
-            messages.extend([attended, retrieved_memories])
-
-            # on the last round, one query token from readout block aggregate / attention residual
-
-            if is_last:
-                continue
-
-            # then we just do attention pooling (attention 'residual') for next round
-            # will use the initial messages coming in as the queries, all products of all the blocks become messages - voting phase
-
-            packed_messages, _ = pack(messages, '* b n d') # (message blocks) packed
-            all_messages = repeat(packed_messages, 'm b n d -> (b l) n m d', l = blocks)
-
-            message_queries, inverse_pack_blocks = pack_with_inverse(tokens, '* n d') # (m b n d)
-            message_queries = rearrange(message_queries, '... n d -> ... n 1 d')
-
-            # each message producer attends to all messages (and their history) by all other producers
-
-            pooled_messages = self.attn_residual(message_queries, all_messages)
-
-            pooled_messages = inverse_pack_blocks(pooled_messages, '* n one d')
-
-            pooled_messages = rearrange(pooled_messages, 'l b n 1 d -> l b n d')
-
-            # keep iterating
-
-            tokens = pooled_messages
+        tokens, messages = self.ensembles_with_message_passing(
+            tokens,
+            module_kwargs = module_kwargs,
+            repeat_input_for_ensemble = True,
+            return_all_messages = True
+        )
 
         # the readout itself is just another message producer
 
-        queries = repeat(self.query_readout, 'd -> b n 1 d', b = batch, n = seq_len)
+        queries = repeat(self.attn_pool_query, 'd -> b n 1 d', b = batch, n = seq_len)
 
         all_messages = rearrange(messages, 'm l b n d -> b n (m l) d')
 
