@@ -47,12 +47,10 @@ def test_ensemble_message_passing_mlp():
 
     mlp = MLP(dim, dim * 2, dim)
 
-    voting_attn = Attention(dim, dim_head = dim_head, heads = heads, dropout = 0.1)
-
     model = EnsemblesWithMessagePassing(
+        dim = dim,
         modules = dict(mlp = mlp),
         ensemble_size = ensemble_size,
-        voting_attn = voting_attn,
         num_message_exchanges = 2
     )
 
@@ -73,16 +71,16 @@ def test_nested_ensemble_message_passing_mlp():
     mlp = MLP(dim, dim * 2, dim)
 
     inner_model = EnsemblesWithMessagePassing(
+        dim = dim,
         modules = dict(mlp = mlp),
         ensemble_size = 4,
-        voting_attn = Attention(dim, dim_head = dim_head, heads = heads, dropout = 0.1),
         num_message_exchanges = 2
     )
 
     outer_model = EnsemblesWithMessagePassing(
+        dim = dim,
         modules = dict(inner = inner_model),
         ensemble_size = 4,
-        voting_attn = Attention(dim, dim_head = dim_head, heads = heads, dropout = 0.1),
         num_message_exchanges = 2
     )
 
