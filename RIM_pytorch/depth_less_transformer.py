@@ -23,6 +23,13 @@ from einops.layers.torch import Rearrange, Reduce
 # i, j - source and target sequence for attention
 # h - attention heads
 
+# types
+
+RoutingIndices = tuple[int, ...]
+RoutingConfig = tuple[str, RoutingIndices]
+RoutingRound = tuple[RoutingConfig, ...]
+RoutingSchedule = tuple[RoutingRound, ...]
+
 # constants
 
 LinearNoBias = partial(Linear, bias = False)
@@ -184,8 +191,21 @@ class Ensemble(Module):
     def parameters(self):
         return dict(zip(self.param_names, self.net_parameters))
 
-    def forward(self, tokens, *args, **kwargs):
-        return self.net_forward(self.parameters, tokens, *args, **kwargs)
+    def forward(
+        self,
+        tokens,
+        indices: tuple[int, ...] | None = None,
+        *args,
+        **kwargs
+    ):
+        params = self.parameters
+
+        if exists(indices):
+            indices = list(indices)
+            params = {k: v[indices] for k, v in params.items()}
+            tokens = tokens[indices]
+
+        return self.net_forward(params, tokens, *args, **kwargs)
 
 # ensembles with message passing
 
@@ -221,10 +241,14 @@ class EnsemblesWithMessagePassing(Module):
         module_kwargs: dict[str, dict] | None = None,
         repeat_input_for_ensemble: bool = False,
         return_all_messages: bool = False,
-        num_message_exchanges: int | None = None
+        num_message_exchanges: int | None = None,
+        routing_schedule: RoutingSchedule | None = None
     ): # (l b ...)
 
-        num_message_exchanges = default(num_message_exchanges, self.num_message_exchanges)
+        if exists(routing_schedule):
+            num_message_exchanges = len(routing_schedule)
+        else:
+            num_message_exchanges = default(num_message_exchanges, self.num_message_exchanges)
 
         if repeat_input_for_ensemble:
             tokens = repeat(tokens, '... -> l ...', l = self.ensemble_size)
@@ -240,9 +264,15 @@ class EnsemblesWithMessagePassing(Module):
 
             # collect messages from all ensembles
 
-            for name, ensemble in self.ensembles.items():
-                kwargs = module_kwargs.get(name, dict())
-                out = ensemble(tokens, **kwargs)
+            active_modules = routing_schedule[count - 1] if exists(routing_schedule) else tuple((name, None) for name in self.ensembles.keys())
+
+            for mod_name, indices in active_modules:
+                if exists(indices) and len(indices) == 0:
+                    continue
+
+                ensemble = self.ensembles[mod_name]
+                kwargs = module_kwargs.get(mod_name, dict())
+                out = ensemble(tokens, indices = indices, **kwargs)
                 messages.append(out)
 
             if is_last and return_all_messages:
@@ -251,7 +281,8 @@ class EnsemblesWithMessagePassing(Module):
             # then we just do attention pooling (attention 'residual') for next round
             # will use the initial messages coming in as the queries, all products of all the blocks become messages - voting phase
 
-            all_messages = repeat(messages, 'm lc b ... d -> (lq b) ... (m lc) d', lq = blocks)
+            flat_messages = torch.cat(messages, dim = 0)
+            all_messages = repeat(flat_messages, 'm b ... d -> (lq b) ... m d', lq = blocks)
 
             message_queries = rearrange(tokens, 'l b ... d -> (l b) ... 1 d')
 
@@ -330,7 +361,8 @@ class DepthlessTransformer(Module):
         self,
         tokens,
         return_messages = False,
-        num_message_exchanges: int | None = None
+        num_message_exchanges: int | None = None,
+        routing_schedule: RoutingSchedule | None = None
     ):
         if exists(self.token_emb):
             tokens = self.token_emb(tokens)
@@ -351,14 +383,16 @@ class DepthlessTransformer(Module):
             module_kwargs = module_kwargs,
             repeat_input_for_ensemble = True,
             return_all_messages = True,
-            num_message_exchanges = num_message_exchanges
+            num_message_exchanges = num_message_exchanges,
+            routing_schedule = routing_schedule
         )
 
         # the readout itself is just another message producer
 
         queries = repeat(self.attn_pool_query, 'd -> b n 1 d', b = batch, n = seq_len)
 
-        all_messages = rearrange(messages, 'm l b n d -> b n (m l) d')
+        flat_messages = torch.cat(messages, dim = 0)
+        all_messages = rearrange(flat_messages, 'm b n d -> b n m d')
 
         readout_input = self.attn_residual(queries, all_messages)
 
