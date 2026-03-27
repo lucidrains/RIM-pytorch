@@ -102,7 +102,8 @@ class Attention(Module):
                 q, k, v,
                 pos_emb = pos_emb,
                 causal = self.causal,
-                dropout = self.dropout_prob
+                dropout = self.dropout_prob,
+                softmax_scale = self.scale
             )
         else:
             sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
