@@ -288,6 +288,9 @@ class EnsemblesWithMessagePassing(Module):
             active_modules = routing_schedule[count - 1] if exists(routing_schedule) else tuple((name, None) for name in self.ensembles.keys())
 
             for config in active_modules:
+
+                # resolve routing config to module name and optional block indices
+
                 if isinstance(config, str) and config in self.ensembles:
                     mod_name = config
                     indices = None
@@ -305,10 +308,21 @@ class EnsemblesWithMessagePassing(Module):
                     if len(indices) == 0:
                         continue
 
+                # run ensemble and collect messages
+
                 ensemble = self.ensembles[mod_name]
                 kwargs = module_kwargs.get(mod_name, dict())
                 out = ensemble(tokens, indices = indices, **kwargs)
-                messages.append(out)
+
+                # a module may produce multiple messages (num_messages, batch, ..., dim)
+                # autodetect by comparing ndim and unbind extra leading dimension
+
+                is_multi_message = out.ndim > tokens.ndim
+
+                if is_multi_message:
+                    messages.extend(out.unbind(1))
+                else:
+                    messages.append(out)
 
             if is_last and return_all_messages:
                 continue

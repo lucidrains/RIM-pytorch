@@ -156,3 +156,37 @@ def test_implicit_single_module_inference():
     assert len(messages) == 3
     assert messages[1].shape == (2, 2, 32, 256)
     assert messages[2].shape == (1, 2, 32, 256)
+
+def test_multi_message_module():
+    from torch import nn
+    from RIM_pytorch.depth_less_transformer import EnsemblesWithMessagePassing, Feedforward
+
+    class TwoMessageFF(nn.Module):
+        def __init__(self, dim):
+            super().__init__()
+            self.ff = Feedforward(dim)
+
+        def forward(self, x):
+            out = self.ff(x)
+            return torch.stack((out, out), dim = 0)
+
+    model = EnsemblesWithMessagePassing(
+        modules = TwoMessageFF(dim = 256),
+        ensemble_size = 3,
+        dim = 256,
+        num_message_exchanges = 1
+    )
+
+    tokens = torch.randn(2, 32, 256)
+
+    messages = model(
+        tokens,
+        repeat_input_for_ensemble = True,
+        return_all_messages = True
+    )
+
+    # init tokens + 2 messages from the two-message feedforward
+    assert len(messages) == 3
+    assert messages[0].shape == (3, 2, 32, 256)
+    assert messages[1].shape == (3, 2, 32, 256)
+    assert messages[2].shape == (3, 2, 32, 256)

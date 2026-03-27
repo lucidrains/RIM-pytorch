@@ -50,12 +50,12 @@ $ pip install RIM-pytorch
 
 ```bibtex
 @misc{wang20261000layernetworksselfsupervised,
-    title  = {1000 Layer Networks for Self-Supervised RL: Scaling Depth Can Enable New Goal-Reaching Capabilities}, 
+    title  = {1000 Layer Networks for Self-Supervised RL: Scaling Depth Can Enable New Goal-Reaching Capabilities},
     author = {Kevin Wang and Ishaan Javali and Michał Bortkiewicz and Tomasz Trzciński and Benjamin Eysenbach},
     year   = {2026},
     eprint = {2503.14858},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url    = {https://arxiv.org/abs/2503.14858}, 
+    url    = {https://arxiv.org/abs/2503.14858},
 }
 ```
