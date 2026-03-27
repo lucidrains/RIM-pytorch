@@ -218,7 +218,7 @@ class Ensemble(Module):
 class EnsemblesWithMessagePassing(Module):
     def __init__(
         self,
-        modules: dict[str, Module],
+        modules: dict[str, Module] | Module,
         ensemble_size: int,
         *,
         dim: int | None = None,
@@ -231,6 +231,9 @@ class EnsemblesWithMessagePassing(Module):
         self.num_message_exchanges = num_message_exchanges
         self.ensemble_size = ensemble_size
         self.routing_schedule = routing_schedule
+
+        if isinstance(modules, Module):
+            modules = dict(module = modules)
 
         self.ensembles = nn.ModuleDict({
             name: Ensemble(module, ensemble_size) for name, module in modules.items()
@@ -264,6 +267,14 @@ class EnsemblesWithMessagePassing(Module):
             tokens = repeat(tokens, '... -> l ...', l = self.ensemble_size)
 
         module_kwargs = default(module_kwargs, dict())
+
+        if len(module_kwargs) > 0:
+            first_key = next(iter(module_kwargs.keys()))
+            if first_key not in self.ensembles:
+                assert len(self.ensembles) == 1, 'module_kwargs must be a dictionary with module names as keys if there are multiple modules in the ensemble'
+                default_name = next(iter(self.ensembles.keys()))
+                module_kwargs = {default_name: module_kwargs}
+
         messages = [tokens]
         blocks = self.ensemble_size
 
@@ -277,11 +288,15 @@ class EnsemblesWithMessagePassing(Module):
             active_modules = routing_schedule[count - 1] if exists(routing_schedule) else tuple((name, None) for name in self.ensembles.keys())
 
             for config in active_modules:
-                if isinstance(config, str):
+                if isinstance(config, str) and config in self.ensembles:
                     mod_name = config
                     indices = None
-                else:
+                elif isinstance(config, tuple) and len(config) == 2 and isinstance(config[0], str) and config[0] in self.ensembles:
                     mod_name, indices = config
+                else:
+                    assert len(self.ensembles) == 1, 'if passing indices directly or relying on string inference in routing_schedule, there must only be one module in the ensemble'
+                    mod_name = next(iter(self.ensembles.keys()))
+                    indices = config
 
                 if exists(indices):
                     if isinstance(indices, int):

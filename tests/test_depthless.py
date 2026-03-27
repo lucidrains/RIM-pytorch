@@ -126,3 +126,33 @@ def test_depthless_implicit_all_indices_routing_schedule():
     assert len(messages) == 5 # init + attn(R1) + ff(R1) + attn(R2) + ff(R2)
     assert messages[1].shape == (3, 2, 32, 256) # 3 attn blocks
     assert logits.shape == (2, 32, 1000)
+
+def test_implicit_single_module_inference():
+    from RIM_pytorch.depth_less_transformer import EnsemblesWithMessagePassing, Attention
+
+    attn = Attention(dim = 256)
+
+    model = EnsemblesWithMessagePassing(
+        dim = 256,
+        modules = attn,
+        ensemble_size = 3,
+        num_message_exchanges = 2
+    )
+
+    routing_schedule = (
+        ((0, 1),),
+        (2,),
+    )
+
+    tokens = torch.randn(2, 32, 256)
+
+    messages = model(
+        tokens,
+        repeat_input_for_ensemble = True,
+        return_all_messages = True,
+        routing_schedule = routing_schedule
+    )
+
+    assert len(messages) == 3
+    assert messages[1].shape == (2, 2, 32, 256)
+    assert messages[2].shape == (1, 2, 32, 256)

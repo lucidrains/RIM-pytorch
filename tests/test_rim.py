@@ -49,7 +49,7 @@ def test_ensemble_message_passing_mlp():
 
     model = EnsemblesWithMessagePassing(
         dim = dim,
-        modules = dict(mlp = mlp),
+        modules = mlp,
         ensemble_size = ensemble_size,
         num_message_exchanges = 2
     )
@@ -72,14 +72,14 @@ def test_nested_ensemble_message_passing_mlp():
 
     inner_model = EnsemblesWithMessagePassing(
         dim = dim,
-        modules = dict(mlp = mlp),
+        modules = mlp,
         ensemble_size = 4,
         num_message_exchanges = 2
     )
 
     outer_model = EnsemblesWithMessagePassing(
         dim = dim,
-        modules = dict(inner = inner_model),
+        modules = inner_model,
         ensemble_size = 4,
         num_message_exchanges = 2
     )
